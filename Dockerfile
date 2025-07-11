@@ -1,3 +1,4 @@
+# 使用更轻量的基础镜像，并指定构建阶段名称
 FROM python:3.13-alpine AS builder
 
 ARG NGINX_VER=1.27.4
@@ -5,62 +6,58 @@ ARG RTMP_VER=1.2.2
 
 WORKDIR /app
 
+# 复制 Pipfile 文件
 COPY Pipfile* ./
 
-RUN apk update && apk add --no-cache gcc musl-dev python3-dev libffi-dev zlib-dev jpeg-dev wget make pcre-dev openssl-dev \
-  && pip install pipenv \
-  && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy
+# 【优化】删除 pipenv 安装逻辑，改为直接复制本地虚拟环境
+COPY .venv /.venv
 
-RUN wget https://nginx.org/download/nginx-${NGINX_VER}.tar.gz && \
-    tar xzf nginx-${NGINX_VER}.tar.gz
+# 下载并解压 Nginx 源码（使用国内镜像加速）
+# 下载并解压 Nginx-RTMP 模块
+# 配置并编译 Nginx 及 RTMP 模块 已被删除
 
-RUN wget https://github.com/arut/nginx-rtmp-module/archive/v${RTMP_VER}.tar.gz && \
-    tar xzf v${RTMP_VER}.tar.gz
+# 使用预构建的 Nginx 包（来自本地 docker/nginx-bin 目录）
+COPY docker/nginx-bin/nginx-bin.tar.gz /tmp/nginx-bin.tar.gz
+RUN mkdir -p /usr/local/nginx && \
+    tar xzf /tmp/nginx-bin.tar.gz -C /usr/local/nginx && \
+    rm /tmp/nginx-bin.tar.gz
 
-WORKDIR /app/nginx-${NGINX_VER}
-RUN ./configure \
-    --add-module=/app/nginx-rtmp-module-${RTMP_VER} \
-    --conf-path=/etc/nginx/nginx.conf \
-    --error-log-path=/var/log/nginx/error.log \
-    --http-log-path=/var/log/nginx/access.log \
-    --with-http_ssl_module && \
-    make && \
-    make install
-
+# 第二阶段：最终运行环境
 FROM python:3.13-alpine
 
 ARG APP_WORKDIR=/iptv-api
 
-ENV APP_WORKDIR=$APP_WORKDIR
-ENV APP_HOST="http://localhost"
-ENV APP_PORT=8000
-ENV PATH="/.venv/bin:/usr/local/nginx/sbin:$PATH"
+ENV APP_WORKDIR=$APP_WORKDIR \
+    APP_HOST="http://localhost" \
+    APP_PORT=8000 \
+    PATH="/.venv/bin:/usr/local/nginx/sbin:$PATH"
 
 WORKDIR $APP_WORKDIR
 
+# 复制项目文件和构建产物
 COPY . $APP_WORKDIR
-
-COPY --from=builder /app/.venv /.venv
+COPY --from=builder /.venv /.venv
 COPY --from=builder /usr/local/nginx /usr/local/nginx
 
+# 创建日志目录并配置软链接
 RUN mkdir -p /var/log/nginx && \
-  ln -sf /dev/stdout /var/log/nginx/access.log && \
-  ln -sf /dev/stderr /var/log/nginx/error.log
+    ln -sf /dev/stdout /var/log/nginx/access.log && \
+    ln -sf /dev/stderr /var/log/nginx/error.log
 
-RUN apk update && apk add --no-cache ffmpeg pcre
+# 安装运行时依赖
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk update && \
+    apk add --no-cache ffmpeg pcre
 
+# 暴露端口
 EXPOSE $APP_PORT 8080 1935
 
+# 复制相关文件到容器中
 COPY entrypoint.sh /iptv-api-entrypoint.sh
-
 COPY config /iptv-api-config
-
 COPY nginx.conf /etc/nginx/nginx.conf
-
-RUN mkdir -p /usr/local/nginx/html
-
 COPY stat.xsl /usr/local/nginx/html/stat.xsl
 
+# 设置入口脚本
 RUN chmod +x /iptv-api-entrypoint.sh
-
-ENTRYPOINT /iptv-api-entrypoint.sh
+ENTRYPOINT ["/iptv-api-entrypoint.sh"]
